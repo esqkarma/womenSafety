@@ -33,7 +33,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    const apiKey = 'yourApikey';
+    const apiKey = 'AIzaSyCKYMRux4oyTuXM4eAIjYVT6_N1qsL2gK4';
     Gemini.init(apiKey: apiKey, enableDebugging: true);
   }
 
