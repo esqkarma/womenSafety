@@ -75,6 +75,10 @@ class _UserHomeState extends State<UserHome> {
   double _lastConfidence = 0.0;
   bool _motionDetectionActive = true;
 
+  // 🆕 LAST CAPTURED MOTION FROM BACKEND
+  Map<String, dynamic>? _lastCapturedMotion;
+  Timer? _motionUpdateTimer;
+
   // 🆕 VOLUME BUTTON VARIABLES
   int _volumeButtonPressCount = 0;
   Timer? _volumeButtonTimer;
@@ -138,10 +142,63 @@ class _UserHomeState extends State<UserHome> {
       _checkMotionForSOS();
     });
 
+    // 🆕 Start timer to periodically get last captured motion
+    _motionUpdateTimer = Timer.periodic(Duration(seconds: 2), (timer) {
+      _getLastCapturedMotion();
+    });
+
     print("✅ Motion detection started");
   }
 
-  // 🆕 CHECK MOTION AND TRIGGER SOS FOR SPECIFIC MOTIONS
+  // 🆕 GET LAST CAPTURED MOTION FROM BACKEND
+  Future<void> _getLastCapturedMotion() async {
+    try {
+      SharedPreferences sh = await SharedPreferences.getInstance();
+      String urls = sh.getString('url') ?? "";
+
+      if (urls.isEmpty) {
+        return;
+      }
+
+      var url = Uri.parse('$urls/myapp/get-last-motion/');
+
+      var response = await http.get(url).timeout(Duration(seconds: 3));
+
+      if (response.statusCode == 200) {
+        var result = jsonDecode(response.body);
+
+        if (result.containsKey('last_captured_motion') && result['last_captured_motion'] != null) {
+          setState(() {
+            _lastCapturedMotion = result['last_captured_motion'];
+          });
+
+          // 🆕 Check if this is a new dangerous motion and trigger SOS
+          _checkLastMotionForSOS(result['last_captured_motion']);
+        }
+      }
+    } catch (e) {
+      // Silent fail - this is optional data
+    }
+  }
+
+  // 🆕 CHECK LAST CAPTURED MOTION FOR SOS TRIGGER
+  void _checkLastMotionForSOS(Map<String, dynamic> motionData) {
+    if (_sosTriggered) return;
+
+    String motionType = motionData['motion_type'] ?? '';
+    bool first3SecCompleted = motionData['first_3sec_completed'] ?? false;
+
+    // 🚨 TRIGGER SOS ONLY FOR RAPID_SHAKE AND THROW WITH 3-SECOND CAPTURE
+    if ((motionType == "rapid_shake" || motionType == "throw") &&
+        first3SecCompleted &&
+        !_sosTriggered) {
+
+      print("🚨🚨🚨 DANGEROUS MOTION CAPTURED FROM BACKEND: $motionType - Triggering SOS! 🚨🚨🚨");
+      _triggerSOSFromMotion(motionType);
+    }
+  }
+
+  // 🆕 CHECK MOTION AND SEND TO BACKEND FOR ANALYSIS
   void _checkMotionForSOS() {
     if (_lastAccelerometer == null || _lastGyroscope == null || _sosTriggered) return;
 
@@ -180,7 +237,7 @@ class _UserHomeState extends State<UserHome> {
 
     // Check if this is significant motion worth analyzing
     if (_isSignificantMotion(sample)) {
-      _analyzeMotionPattern(_getSensorBuffer());
+      _sendMotionToBackend(_getSensorBuffer());
     }
   }
 
@@ -214,38 +271,8 @@ class _UserHomeState extends State<UserHome> {
     return accMagnitude > 20.0 || gyroMagnitude > 5.0;
   }
 
-  // 🆕 VERIFY PHYSICAL MOTION INTENSITY
-  bool _isViolentPhysicalMotion(List<Map<String, double>> samples) {
-    if (samples.isEmpty) return false;
-
-    double maxAccMagnitude = 0;
-    double maxGyroMagnitude = 0;
-
-    for (var sample in samples) {
-      double accMagnitude = sqrt(
-          sample['ax']! * sample['ax']! +
-              sample['ay']! * sample['ay']! +
-              sample['az']! * sample['az']!
-      );
-
-      double gyroMagnitude = sqrt(
-          sample['gx']! * sample['gx']! +
-              sample['gy']! * sample['gy']! +
-              sample['gz']! * sample['gz']!
-      );
-
-      if (accMagnitude > maxAccMagnitude) maxAccMagnitude = accMagnitude;
-      if (gyroMagnitude > maxGyroMagnitude) maxGyroMagnitude = gyroMagnitude;
-    }
-
-    print("💥 Max motion detected - Acc: ${maxAccMagnitude.toStringAsFixed(2)}, Gyro: ${maxGyroMagnitude.toStringAsFixed(2)}");
-
-    // Require very strong physical motion
-    return maxAccMagnitude > 25.0 || maxGyroMagnitude > 8.0;
-  }
-
-  // 🆕 ANALYZE MOTION PATTERN AND SEND TO BACKEND
-  void _analyzeMotionPattern(List<Map<String, double>> samples) async {
+  // 🆕 SEND MOTION DATA TO BACKEND FOR ANALYSIS
+  void _sendMotionToBackend(List<Map<String, double>> samples) async {
     try {
       SharedPreferences sh = await SharedPreferences.getInstance();
       String urls = sh.getString('url') ?? "";
@@ -259,17 +286,6 @@ class _UserHomeState extends State<UserHome> {
 
       // 🆕 Print what we're sending
       print("📤 Sending ${samples.length} samples to API");
-      if (samples.isNotEmpty) {
-        var strongestSample = samples.reduce((a, b) {
-          double aMag = sqrt(a['ax']! * a['ax']! + a['ay']! * a['ay']! + a['az']! * a['az']!);
-          double bMag = sqrt(b['ax']! * b['ax']! + b['ay']! * b['ay']! + b['az']! * b['az']!);
-          return aMag > bMag ? a : b;
-        });
-        print("💪 Strongest sample - "
-            "ax: ${strongestSample['ax']!.toStringAsFixed(2)}, "
-            "ay: ${strongestSample['ay']!.toStringAsFixed(2)}, "
-            "az: ${strongestSample['az']!.toStringAsFixed(2)}");
-      }
 
       var response = await http.post(
         url,
@@ -292,16 +308,8 @@ class _UserHomeState extends State<UserHome> {
 
           print("🎯 Motion prediction: $predictedAction (${(confidence * 100).toStringAsFixed(2)}%)");
 
-          // 🚨 TRIGGER SOS ONLY FOR RAPID_SHAKE AND THROW WITH HIGH CONFIDENCE
-          if ((predictedAction == "rapid_shake" || predictedAction == "throw") &&
-              confidence > 0.9950 &&
-              _isViolentPhysicalMotion(samples) &&
-              !_sosTriggered) {
-            print("🚨🚨🚨 DANGEROUS MOTION DETECTED: $predictedAction - Triggering SOS! 🚨🚨🚨");
-            _triggerSOSFromMotion(predictedAction);
-          } else if (confidence > 0.9950) {
-            print("⚠️ High confidence but not violent enough or wrong action: $predictedAction");
-          }
+          // 🆕 We don't trigger SOS here anymore - backend will handle it
+          // SOS will be triggered when we get the last captured motion with 3-second completion
         }
       } else {
         print("❌ API Error: ${response.statusCode} - ${response.body}");
@@ -401,7 +409,7 @@ class _UserHomeState extends State<UserHome> {
     }
 
     print("💥 Test data created - very violent motion simulation");
-    _analyzeMotionPattern(testSamples);
+    _sendMotionToBackend(testSamples);
   }
 
   Future<void> initSpeechToText() async {
@@ -691,6 +699,7 @@ class _UserHomeState extends State<UserHome> {
   void dispose() {
     _recordingTimer?.cancel();
     _motionSamplingTimer?.cancel();
+    _motionUpdateTimer?.cancel();
     _accelerometerSubscription?.cancel();
     _gyroscopeSubscription?.cancel();
     _volumeButtonTimer?.cancel();
@@ -729,10 +738,16 @@ class _UserHomeState extends State<UserHome> {
               top: 50, right: 20,
               child: _StatusIndicator(icon: Icons.mic, text: 'Recording', color: Colors.red),
             ),
+          // 🆕 Last captured motion display
+          if (_lastCapturedMotion != null)
+            Positioned(
+              top: 50, left: 20,
+              child: _LastMotionIndicator(motionData: _lastCapturedMotion!),
+            ),
           // 🆕 Volume press counter
           if (_volumeButtonPressCount > 0)
             Positioned(
-              top: 50, left: 20,
+              top: 90, left: 20,
               child: _VolumePressCounter(count: _volumeButtonPressCount),
             ),
           // 🆕 Motion detection test button (remove in production)
@@ -778,6 +793,7 @@ class _UserHomeState extends State<UserHome> {
     Set_emergency_number(title: "Emergency Number"),
   ];
 
+  // ... rest of the existing methods (buildDrawer, textArea, etc.) remain the same
   void _showLogoutDialog(BuildContext context) {
     showDialog(
       context: context,
@@ -1064,6 +1080,73 @@ class _StatusIndicator extends StatelessWidget {
   }
 }
 
+// 🆕 Last Motion Indicator Widget
+class _LastMotionIndicator extends StatelessWidget {
+  final Map<String, dynamic> motionData;
+
+  const _LastMotionIndicator({required this.motionData});
+
+  @override
+  Widget build(BuildContext context) {
+    String motionType = motionData['motion_type'] ?? 'unknown';
+    bool first3SecCompleted = motionData['first_3sec_completed'] ?? false;
+    String formattedStart = motionData['formatted_start'] ?? 'Unknown time';
+
+    Color getColor() {
+      if (motionType == 'rapid_shake' || motionType == 'throw') {
+        return Colors.red;
+      } else if (motionType == 'shake') {
+        return Colors.orange;
+      } else {
+        return Colors.green;
+      }
+    }
+
+    IconData getIcon() {
+      if (motionType == 'rapid_shake') return Icons.vibration;
+      if (motionType == 'throw') return Icons.flight_takeoff;
+      if (motionType == 'shake') return Icons.waves;
+      return Icons.accessibility;
+    }
+
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: getColor().withOpacity(0.9),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(getIcon(), color: Colors.white, size: 16),
+          SizedBox(width: 6),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${motionType.replaceAll('_', ' ').toUpperCase()}',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold
+                ),
+              ),
+              Text(
+                first3SecCompleted ? '3s Captured' : 'Short',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 8,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // Volume Press Counter Widget
 class _VolumePressCounter extends StatelessWidget {
   final int count;
@@ -1097,6 +1180,7 @@ class _VolumePressCounter extends StatelessWidget {
   }
 }
 
+// ... rest of your existing MainHome class remains the same
 class MainHome extends StatefulWidget {
   const MainHome({super.key});
 
@@ -1417,108 +1501,6 @@ class _MainHomeState extends State<MainHome> {
             ),
           ),
           const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              tip,
-              style: const TextStyle(
-                fontSize: 14,
-                color: Colors.black87,
-                height: 1.4,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SafetySection extends StatelessWidget {
-  final String title;
-  final List<String> items;
-  final IconData icon;
-  final Color color;
-
-  const _SafetySection({
-    required this.title,
-    required this.items,
-    required this.icon,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: color.withOpacity(0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(icon, color: color, size: 24),
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.black87,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Column(
-              children: items.map((item) => _SafetyTipItem(tip: item)).toList(),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SafetyTipItem extends StatelessWidget {
-  final String tip;
-
-  const _SafetyTipItem({required this.tip});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            margin: const EdgeInsets.only(top: 6, right: 12),
-            width: 6,
-            height: 6,
-            decoration: const BoxDecoration(
-              color: Colors.pink,
-              shape: BoxShape.circle,
-            ),
-          ),
           Expanded(
             child: Text(
               tip,

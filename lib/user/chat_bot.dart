@@ -1,24 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_gemini/flutter_gemini.dart';
 
-void main() {
-  runApp(MyApp());
-}
-
-class MyApp extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Gemini Chatbot',
-      theme: ThemeData(
-        primarySwatch: Colors.purple,
-        scaffoldBackgroundColor: Color(0xFFF5F7FB),
-      ),
-      home: ChatScreen(),
-      debugShowCheckedModeBanner: false,
-    );
-  }
-}
 
 class ChatScreen extends StatefulWidget {
   @override
