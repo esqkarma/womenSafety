@@ -11,19 +11,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shecare/login.dart';
-import 'package:shecare/hm/data.dart';
 import 'package:shecare/sos_service.dart';
-import 'package:shecare/user/add_dangerous_spot.dart';
-import 'package:shecare/user/audio_em.dart';
-import 'package:shecare/user/chat_bot.dart';
 import 'package:shecare/user/emergency_number.dart';
-import 'package:shecare/user/search_nearby_users.dart';
-import 'package:shecare/user/send_visuals.dart';
-import 'package:shecare/user/view_dangerous_spot.dart';
-import 'package:shecare/user/view_ideas_and_image.dart';
-import 'package:shecare/user/view_my_dangerous_spot.dart';
-import 'package:shecare/user/viewnearestpinkpolice.dart';
-import 'package:shecare/user/viewreplies.dart';
 import 'package:http/http.dart' as http;
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:speech_to_text/speech_to_text.dart';
@@ -46,9 +35,14 @@ class _UserHomeState extends State<UserHome> {
   // Voice detection
   final stt.SpeechToText _speech = stt.SpeechToText();
   bool _isListening = false;
-  String _text = "Initializing speech...";
-  double _confidence = 1.0;
-  final List<String> targetWords = ["help", "emergency", "sos", "save me", "danger", "help me"];
+  final List<String> targetWords = [
+    "help",
+    "emergency",
+    "sos",
+    "save me",
+    "danger",
+    "help me"
+  ];
 
   // Audio recording and sending
   bool _isRecording = false;
@@ -83,11 +77,17 @@ class _UserHomeState extends State<UserHome> {
   int _volumeButtonPressCount = 0;
   Timer? _volumeButtonTimer;
   final int _requiredVolumePresses = 3;
-  final Duration _volumePressTimeout = Duration(seconds: 2);
+  final Duration _volumePressTimeout = const Duration(seconds: 2);
 
   // 🆕 SENSOR DATA BUFFER
   List<Map<String, double>> _sensorBuffer = [];
   final int _bufferSize = 10;
+
+  // 🆕 MULTI-FACTOR DETECTION VARIABLES
+  bool _voiceTriggerDetected = false;
+  bool _voiceEmotionDetected = false;
+  bool _phoneMotionDetected = false;
+  Timer? _detectionResetTimer;
 
   //todo => Checking if the user accepts all the permissions
   Future<bool> _requestPermissions() async {
@@ -99,7 +99,8 @@ class _UserHomeState extends State<UserHome> {
 
     bool allGranted = statuses.values.every((status) => status.isGranted);
     if (!allGranted) {
-      Fluttertoast.showToast(msg: 'Microphone, storage and sensor permissions required');
+      Fluttertoast.showToast(
+          msg: 'Microphone, storage and sensor permissions required');
     }
     return allGranted;
   }
@@ -108,10 +109,24 @@ class _UserHomeState extends State<UserHome> {
   Future<void> _initAudioRecorder() async {
     try {
       await _audioRecorder.openRecorder();
-      await _audioRecorder.setSubscriptionDuration(const Duration(milliseconds: 10));
+      await _audioRecorder
+          .setSubscriptionDuration(const Duration(milliseconds: 10));
       print("✅ Audio recorder initialized successfully");
     } catch (e) {
       print("❌ Error initializing audio recorder: $e");
+    }
+  }
+
+  // 🆕 CHECK BACKEND URL
+  Future<void> _checkBackendURL() async {
+    SharedPreferences sh = await SharedPreferences.getInstance();
+    String urls = sh.getString('url') ?? "";
+    print("🔗 Stored backend URL: $urls");
+
+    if (urls.isEmpty) {
+      print("❌ No backend URL found in SharedPreferences!");
+    } else {
+      print("✅ Backend URL found: $urls");
     }
   }
 
@@ -119,8 +134,11 @@ class _UserHomeState extends State<UserHome> {
   void _startMotionDetection() async {
     if (!_motionDetectionActive) return;
 
+    print("🔄 Starting motion detection system...");
+
     // Listen to accelerometer
-    _accelerometerSubscription = accelerometerEvents.listen((AccelerometerEvent event) {
+    _accelerometerSubscription =
+        accelerometerEvents.listen((AccelerometerEvent event) {
       if (mounted) {
         setState(() {
           _lastAccelerometer = event;
@@ -138,46 +156,75 @@ class _UserHomeState extends State<UserHome> {
     });
 
     // Start synchronized sampling timer
-    _motionSamplingTimer = Timer.periodic(Duration(milliseconds: _samplingRate), (timer) {
+    _motionSamplingTimer =
+        Timer.periodic(Duration(milliseconds: _samplingRate), (timer) {
       _checkMotionForSOS();
     });
 
     // 🆕 Start timer to periodically get last captured motion
-    _motionUpdateTimer = Timer.periodic(Duration(seconds: 2), (timer) {
+    _motionUpdateTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      print("⏰ Motion update timer triggered");
       _getLastCapturedMotion();
     });
 
-    print("✅ Motion detection started");
+    // 🆕 Also call it immediately once
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _getLastCapturedMotion();
+    });
+
+    print("✅ Motion detection started with update timer");
   }
 
   // 🆕 GET LAST CAPTURED MOTION FROM BACKEND
   Future<void> _getLastCapturedMotion() async {
     try {
+      print("🔄 Fetching motion history from backend...");
+
       SharedPreferences sh = await SharedPreferences.getInstance();
       String urls = sh.getString('url') ?? "";
 
       if (urls.isEmpty) {
+        print("❌ No backend URL configured in SharedPreferences");
         return;
       }
 
-      var url = Uri.parse('$urls/myapp/get-last-motion/');
+      print("🔗 Backend URL: $urls");
 
-      var response = await http.get(url).timeout(Duration(seconds: 3));
+      // Use the correct endpoint that exists in your backend
+      var url = Uri.parse('$urls/myapp/get-motion-history/');
+      print("🌐 Calling URL: $url");
+
+      var response = await http.get(url).timeout(const Duration(seconds: 5));
+
+      print("📡 Response status: ${response.statusCode}");
 
       if (response.statusCode == 200) {
         var result = jsonDecode(response.body);
+        print("📥 Motion History API Response received");
 
-        if (result.containsKey('last_captured_motion') && result['last_captured_motion'] != null) {
+        // Check if we have motion history and get the last one
+        if (result.containsKey('motion_history') &&
+            result['motion_history'] != null &&
+            result['motion_history'].length > 0) {
+          var lastMotion = result['motion_history'].last;
+          print(
+              "📥 Last captured motion found: ${lastMotion['motion_type']} - 3s: ${lastMotion['first_3sec_completed']}");
+
           setState(() {
-            _lastCapturedMotion = result['last_captured_motion'];
+            _lastCapturedMotion = lastMotion;
           });
 
           // 🆕 Check if this is a new dangerous motion and trigger SOS
-          _checkLastMotionForSOS(result['last_captured_motion']);
+          _checkLastMotionForSOS(lastMotion);
+        } else {
+          print("ℹ️ No motion history found in response");
         }
+      } else {
+        print(
+            "❌ Motion History API Error: ${response.statusCode} - ${response.body}");
       }
     } catch (e) {
-      // Silent fail - this is optional data
+      print("❌ Last motion fetch error: $e");
     }
   }
 
@@ -188,19 +235,88 @@ class _UserHomeState extends State<UserHome> {
     String motionType = motionData['motion_type'] ?? '';
     bool first3SecCompleted = motionData['first_3sec_completed'] ?? false;
 
+    print(
+        "📥 Checking last motion - Type: '$motionType', 3s Completed: $first3SecCompleted");
+
     // 🚨 TRIGGER SOS ONLY FOR RAPID_SHAKE AND THROW WITH 3-SECOND CAPTURE
     if ((motionType == "rapid_shake" || motionType == "throw") &&
         first3SecCompleted &&
         !_sosTriggered) {
-
-      print("🚨🚨🚨 DANGEROUS MOTION CAPTURED FROM BACKEND: $motionType - Triggering SOS! 🚨🚨🚨");
-      _triggerSOSFromMotion(motionType);
+      print(
+          "🚨🚨🚨 DANGEROUS MOTION CAPTURED FROM BACKEND: $motionType - Triggering SOS! 🚨🚨🚨");
+      _setPhoneMotionDetected();
+    } else {
+      print(
+          "⚠️ Motion not dangerous or not completed: '$motionType' (3s: $first3SecCompleted)");
     }
+  }
+
+  // 🆕 SET PHONE MOTION DETECTED AND CHECK FOR MULTI-FACTOR
+  void _setPhoneMotionDetected() {
+    setState(() {
+      _phoneMotionDetected = true;
+    });
+    print(
+        "📱 Phone motion detected - Current factors: Voice: $_voiceTriggerDetected, Emotion: $_voiceEmotionDetected, Motion: $_phoneMotionDetected");
+    _checkMultiFactorDetection();
+    _startDetectionResetTimer();
+  }
+
+  // 🆕 SET VOICE TRIGGER DETECTED AND CHECK FOR MULTI-FACTOR
+  void _setVoiceTriggerDetected() {
+    setState(() {
+      _voiceTriggerDetected = true;
+    });
+    print(
+        "🎤 Voice trigger detected - Current factors: Voice: $_voiceTriggerDetected, Emotion: $_voiceEmotionDetected, Motion: $_phoneMotionDetected");
+    _checkMultiFactorDetection();
+    _startDetectionResetTimer();
+  }
+
+  // 🆕 SET VOICE EMOTION DETECTED AND CHECK FOR MULTI-FACTOR
+  void _setVoiceEmotionDetected() {
+    setState(() {
+      _voiceEmotionDetected = true;
+    });
+    print(
+        "😢 Voice emotion detected - Current factors: Voice: $_voiceTriggerDetected, Emotion: $_voiceEmotionDetected, Motion: $_phoneMotionDetected");
+    _checkMultiFactorDetection();
+    _startDetectionResetTimer();
+  }
+
+  // 🆕 CHECK MULTI-FACTOR DETECTION (AT LEAST 2 OUT OF 3)
+  void _checkMultiFactorDetection() {
+    int detectedFactors = 0;
+    if (_voiceTriggerDetected) detectedFactors++;
+    if (_voiceEmotionDetected) detectedFactors++;
+    if (_phoneMotionDetected) detectedFactors++;
+
+    print("🔍 Multi-factor check: $detectedFactors/3 factors detected");
+
+    if (detectedFactors >= 2 && !_sosTriggered) {
+      print(
+          "🚨🚨🚨 MULTI-FACTOR SOS TRIGGERED! $detectedFactors factors detected 🚨🚨🚨");
+      _triggerSOSFromMultiFactor();
+    }
+  }
+
+  // 🆕 START DETECTION RESET TIMER
+  void _startDetectionResetTimer() {
+    _detectionResetTimer?.cancel();
+    _detectionResetTimer = Timer(const Duration(seconds: 30), () {
+      print("🔄 Resetting detection factors after 30 seconds");
+      setState(() {
+        _voiceTriggerDetected = false;
+        _voiceEmotionDetected = false;
+        _phoneMotionDetected = false;
+      });
+    });
   }
 
   // 🆕 CHECK MOTION AND SEND TO BACKEND FOR ANALYSIS
   void _checkMotionForSOS() {
-    if (_lastAccelerometer == null || _lastGyroscope == null || _sosTriggered) return;
+    if (_lastAccelerometer == null || _lastGyroscope == null || _sosTriggered)
+      return;
 
     Map<String, double> sample = {
       "ax": _lastAccelerometer!.x,
@@ -215,17 +331,13 @@ class _UserHomeState extends State<UserHome> {
     _addToSensorBuffer(sample);
 
     // 🆕 Calculate motion intensity for debugging
-    double accMagnitude = sqrt(
-        sample['ax']! * sample['ax']! +
-            sample['ay']! * sample['ay']! +
-            sample['az']! * sample['az']!
-    );
+    double accMagnitude = sqrt(sample['ax']! * sample['ax']! +
+        sample['ay']! * sample['ay']! +
+        sample['az']! * sample['az']!);
 
-    double gyroMagnitude = sqrt(
-        sample['gx']! * sample['gx']! +
-            sample['gy']! * sample['gy']! +
-            sample['gz']! * sample['gz']!
-    );
+    double gyroMagnitude = sqrt(sample['gx']! * sample['gx']! +
+        sample['gy']! * sample['gy']! +
+        sample['gz']! * sample['gz']!);
 
     // 🆕 Print strong motion for debugging
     if (accMagnitude > 18.0 || gyroMagnitude > 4.0) {
@@ -255,17 +367,13 @@ class _UserHomeState extends State<UserHome> {
 
   // 🆕 CHECK IF MOTION IS SIGNIFICANT ENOUGH TO ANALYZE
   bool _isSignificantMotion(Map<String, double> sample) {
-    double accMagnitude = sqrt(
-        sample['ax']! * sample['ax']! +
-            sample['ay']! * sample['ay']! +
-            sample['az']! * sample['az']!
-    );
+    double accMagnitude = sqrt(sample['ax']! * sample['ax']! +
+        sample['ay']! * sample['ay']! +
+        sample['az']! * sample['az']!);
 
-    double gyroMagnitude = sqrt(
-        sample['gx']! * sample['gx']! +
-            sample['gy']! * sample['gy']! +
-            sample['gz']! * sample['gz']!
-    );
+    double gyroMagnitude = sqrt(sample['gx']! * sample['gx']! +
+        sample['gy']! * sample['gy']! +
+        sample['gz']! * sample['gz']!);
 
     // 🆕 Higher thresholds to ensure only violent motions are analyzed
     return accMagnitude > 20.0 || gyroMagnitude > 5.0;
@@ -287,29 +395,37 @@ class _UserHomeState extends State<UserHome> {
       // 🆕 Print what we're sending
       print("📤 Sending ${samples.length} samples to API");
 
-      var response = await http.post(
-        url,
-        headers: {"Content-Type": "application/json"},
-        body: jsonEncode({"data": samples}),
-      ).timeout(Duration(seconds: 5));
+      var response = await http
+          .post(
+            url,
+            headers: {"Content-Type": "application/json"},
+            body: jsonEncode({"data": samples}),
+          )
+          .timeout(const Duration(seconds: 5));
 
       if (response.statusCode == 200) {
         var result = jsonDecode(response.body);
         print("📥 API Response: $result");
 
         if (!result.containsKey('error')) {
-          String predictedAction = result['action'];
-          double confidence = result['confidence'];
+          // 🆕 Extract action and confidence from the response
+          String predictedAction = result['action'] ?? '';
+          double confidence = result['confidence'] ?? 0.0;
 
           setState(() {
             _lastPrediction = predictedAction;
             _lastConfidence = confidence;
           });
 
-          print("🎯 Motion prediction: $predictedAction (${(confidence * 100).toStringAsFixed(2)}%)");
+          print(
+              "🎯 Motion prediction: $predictedAction (${(confidence * 100).toStringAsFixed(2)}%)");
 
-          // 🆕 We don't trigger SOS here anymore - backend will handle it
-          // SOS will be triggered when we get the last captured motion with 3-second completion
+          // 🆕 Set motion detected for multi-factor system
+          if ((predictedAction == "rapid_shake" ||
+                  predictedAction == "throw") &&
+              confidence > 0.8) {
+            _setPhoneMotionDetected();
+          }
         }
       } else {
         print("❌ API Error: ${response.statusCode} - ${response.body}");
@@ -319,11 +435,11 @@ class _UserHomeState extends State<UserHome> {
     }
   }
 
-  // 🆕 TRIGGER SOS FROM MOTION DETECTION
-  Future<void> _triggerSOSFromMotion(String motionType) async {
+  // 🆕 TRIGGER SOS FROM MULTI-FACTOR DETECTION
+  Future<void> _triggerSOSFromMultiFactor() async {
     if (_sosTriggered) return;
 
-    print("🚨🚨🚨 SOS ACTIVATED by $motionType! 🚨🚨🚨");
+    print("🚨🚨🚨 MULTI-FACTOR SOS ACTIVATED! 🚨🚨🚨");
 
     setState(() {
       _sosTriggered = true;
@@ -336,7 +452,8 @@ class _UserHomeState extends State<UserHome> {
 
     // Show immediate feedback
     Fluttertoast.showToast(
-      msg: '🚨 SOS ACTIVATED! $motionType detected - Sending alerts...',
+      msg:
+          '🚨 SOS ACTIVATED! Multiple danger signs detected - Sending alerts...',
       toastLength: Toast.LENGTH_LONG,
       gravity: ToastGravity.TOP,
       backgroundColor: Colors.red,
@@ -349,9 +466,16 @@ class _UserHomeState extends State<UserHome> {
     // Clear buffer after detection
     _sensorBuffer.clear();
 
+    // Reset detection factors
+    setState(() {
+      _voiceTriggerDetected = false;
+      _voiceEmotionDetected = false;
+      _phoneMotionDetected = false;
+    });
+
     // Reset after 15 seconds
     Timer(const Duration(seconds: 15), () {
-      print("🔄 Resetting SOS state after motion detection");
+      print("🔄 Resetting SOS state after multi-factor detection");
       setState(() {
         _sosTriggered = false;
         _currentMotion = "monitoring";
@@ -360,7 +484,7 @@ class _UserHomeState extends State<UserHome> {
     });
   }
 
-  // 🆕 HANDLE VOLUME BUTTON PRESSES
+  // 🆕 HANDLE VOLUME BUTTON PRESSES (DIRECT SOS - NO MULTI-FACTOR REQUIRED)
   void _handleVolumeButtonPress() {
     print("🔊 Volume button pressed - Count: ${_volumeButtonPressCount + 1}");
 
@@ -428,7 +552,7 @@ class _UserHomeState extends State<UserHome> {
           final text = result.recognizedWords.toLowerCase();
           print('Heard: $text');
           if (text.contains('help')) {
-            _triggerSOS();
+            _setVoiceTriggerDetected(); // 🆕 Changed from direct SOS to setting detection
           }
         },
         listenMode: ListenMode.confirmation,
@@ -444,14 +568,12 @@ class _UserHomeState extends State<UserHome> {
         print('🎤 Speech Status: $status');
         if (status == 'done' && _isListening && !_sosTriggered) {
           _restartListening();
-        } else if (status == 'listening') {
-          setState(() => _text = "Listening... Say 'help' for SOS");
-        }
+        } else if (status == 'listening') {}
       },
       onError: (error) {
-        print('❌ Speech Error: ${error.errorMsg}, permanent: ${error.permanent}');
+        print(
+            '❌ Speech Error: ${error.errorMsg}, permanent: ${error.permanent}');
         if (error.errorMsg == 'error_permission') {
-          setState(() => _text = "Speech permission issue - using fallback");
         } else if (!_sosTriggered) {
           Timer(const Duration(seconds: 2), _restartListening);
         }
@@ -461,13 +583,10 @@ class _UserHomeState extends State<UserHome> {
     if (speechAvailable) {
       setState(() {
         _isListening = true;
-        _text = "Ready - Say 'help' for SOS";
       });
       _startListening();
       print("✅ Speech recognition initialized successfully");
-    } else {
-      setState(() => _text = "Speech recognition unavailable - using other SOS methods");
-    }
+    } else {}
   }
 
   void _restartListening() {
@@ -483,16 +602,14 @@ class _UserHomeState extends State<UserHome> {
       _speech.listen(
         onResult: (result) {
           String recognizedText = result.recognizedWords.toLowerCase();
-          setState(() {
-            _text = "Heard: $recognizedText";
-          });
+          setState(() {});
 
           print("🎯 Speech detected: $recognizedText");
 
           for (String target in targetWords) {
             if (recognizedText.contains(target) && !_sosTriggered) {
               print("🚨 TARGET WORD DETECTED: '$target' in '$recognizedText'");
-              _triggerSOS();
+              _setVoiceTriggerDetected(); // 🆕 Changed from direct SOS to setting detection
               break;
             }
           }
@@ -509,15 +626,14 @@ class _UserHomeState extends State<UserHome> {
     }
   }
 
-  // 🚨 SOS Trigger Function
+  // 🚨 SOS Trigger Function (DIRECT - for volume button)
   Future<void> _triggerSOS() async {
     if (_sosTriggered) return;
 
-    print("🚨🚨🚨 SOS ACTIVATED! 🚨🚨🚨");
+    print("🚨🚨🚨 VOLUME BUTTON SOS ACTIVATED! 🚨🚨🚨");
 
     setState(() {
       _sosTriggered = true;
-      _text = "🚨 SOS ACTIVATED - Sending alerts...";
     });
 
     if (_speech.isListening) _speech.stop();
@@ -537,7 +653,6 @@ class _UserHomeState extends State<UserHome> {
       print("🔄 Resetting SOS state");
       setState(() {
         _sosTriggered = false;
-        _text = "Ready - Say 'help' for SOS";
       });
       _restartListening();
     });
@@ -587,6 +702,8 @@ class _UserHomeState extends State<UserHome> {
       final audioFile = File(_currentAudioPath!);
       if (await audioFile.exists() && await audioFile.length() > 0) {
         await _sendAudioToBackend(_currentAudioPath!);
+        // 🆕 After sending audio, assume voice emotion detection
+        _setVoiceEmotionDetected();
       } else {
         print("⚠️ No audio to send");
       }
@@ -611,14 +728,16 @@ class _UserHomeState extends State<UserHome> {
         return;
       }
 
-      final request = http.MultipartRequest('POST', Uri.parse('$url/myapp/recordings/'))
-        ..files.add(await http.MultipartFile.fromPath(
-          'audio',
-          file.path,
-          filename: 'child_audio.wav',
-        ));
+      final request =
+          http.MultipartRequest('POST', Uri.parse('$url/myapp/recordings/'))
+            ..files.add(await http.MultipartFile.fromPath(
+              'audio',
+              file.path,
+              filename: 'child_audio.wav',
+            ));
 
-      final streamedResponse = await request.send().timeout(const Duration(seconds: 30));
+      final streamedResponse =
+          await request.send().timeout(const Duration(seconds: 30));
       final response = await http.Response.fromStream(streamedResponse);
 
       if (response.statusCode == 200) {
@@ -665,7 +784,7 @@ class _UserHomeState extends State<UserHome> {
       if (phn.isEmpty) {
         print("⚠️ No emergency numbers found");
         ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Please add emergency numbers")));
+            const SnackBar(content: Text("Please add emergency numbers")));
       } else {
         print("✅ Loaded ${phn.length} emergency numbers");
       }
@@ -682,6 +801,9 @@ class _UserHomeState extends State<UserHome> {
     fetchContacts();
     _initSpeech();
     _initAudioRecorder();
+
+    // 🆕 Check if URL is available
+    _checkBackendURL();
 
     // 🆕 START MOTION DETECTION
     _startMotionDetection();
@@ -700,6 +822,7 @@ class _UserHomeState extends State<UserHome> {
     _recordingTimer?.cancel();
     _motionSamplingTimer?.cancel();
     _motionUpdateTimer?.cancel();
+    _detectionResetTimer?.cancel();
     _accelerometerSubscription?.cancel();
     _gyroscopeSubscription?.cancel();
     _volumeButtonTimer?.cancel();
@@ -711,7 +834,6 @@ class _UserHomeState extends State<UserHome> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      drawer: _buildDrawer(context),
       bottomNavigationBar: BottomAppBar(
         shape: const CircularNotchedRectangle(),
         notchMargin: 8,
@@ -734,52 +856,37 @@ class _UserHomeState extends State<UserHome> {
           screens[selectedIndex],
           // Status indicators
           if (_isRecording)
-            Positioned(
-              top: 50, right: 20,
-              child: _StatusIndicator(icon: Icons.mic, text: 'Recording', color: Colors.red),
+            const Positioned(
+              top: 50,
+              right: 20,
+              child: _StatusIndicator(
+                  icon: Icons.mic, text: 'Recording', color: Colors.red),
             ),
-          // 🆕 Last captured motion display
-          if (_lastCapturedMotion != null)
-            Positioned(
-              top: 50, left: 20,
-              child: _LastMotionIndicator(motionData: _lastCapturedMotion!),
-            ),
-          // 🆕 Volume press counter
-          if (_volumeButtonPressCount > 0)
-            Positioned(
-              top: 90, left: 20,
-              child: _VolumePressCounter(count: _volumeButtonPressCount),
-            ),
-          // 🆕 Motion detection test button (remove in production)
-          Positioned(
-            bottom: 100,
-            right: 20,
-            child: FloatingActionButton(
-              mini: true,
-              onPressed: _testMotionDetection,
-              child: Icon(Icons.bug_report),
-              backgroundColor: Colors.blue,
-            ),
-          ),
         ],
       ),
-      floatingActionButton: isMicButtonPressed ? FloatingActionButton(
-        shape: const CircleBorder(),
-        onPressed: () {
-          _stopRecording();
-          _stopRecordingAndSend();
-          setState(() {
-            isMicButtonPressed = false;
-          });
-        }, child: Icon(Icons.stop),) : FloatingActionButton(
-        shape: const CircleBorder(),
-        onPressed: () {
-          _initAudioRecorder();
-          _startRecording();
-          setState(() {
-            isMicButtonPressed = true;
-          });
-        }, child: Icon(Icons.mic),),
+      floatingActionButton: isMicButtonPressed
+          ? FloatingActionButton(
+              shape: const CircleBorder(),
+              onPressed: () {
+                _stopRecording();
+                _stopRecordingAndSend();
+                setState(() {
+                  isMicButtonPressed = false;
+                });
+              },
+              child: const Icon(Icons.stop),
+            )
+          : FloatingActionButton(
+              shape: const CircleBorder(),
+              onPressed: () {
+                _initAudioRecorder();
+                _startRecording();
+                setState(() {
+                  isMicButtonPressed = true;
+                });
+              },
+              child: const Icon(Icons.mic),
+            ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
     );
   }
@@ -789,169 +896,15 @@ class _UserHomeState extends State<UserHome> {
   }
 
   final List<Widget> screens = [
-    MainHome(),
-    Set_emergency_number(title: "Emergency Number"),
+    const MainHome(),
+    const Set_emergency_number(title: "Emergency Number"),
   ];
 
-  // ... rest of the existing methods (buildDrawer, textArea, etc.) remain the same
-  void _showLogoutDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return Dialog(
-          backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          child: Padding(
-            padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 60, height: 60,
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.red.withOpacity(0.1)),
-                  child: const Icon(Icons.logout_rounded, size: 30, color: Colors.red),
-                ),
-                const SizedBox(height: 16),
-                const Text('Logout', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 8),
-                const Text('Are you sure you want to logout?', textAlign: TextAlign.center, style: TextStyle(fontSize: 16, color: Colors.grey)),
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context), style: OutlinedButton.styleFrom(foregroundColor: Colors.grey, side: const BorderSide(color: Colors.grey), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text('Cancel'))),
-                    const SizedBox(width: 16),
-                    Expanded(child: ElevatedButton(onPressed: () { Navigator.pop(context); Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => LoginPage())); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text('Logout'))),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
 
-  Widget _buildDrawer(BuildContext context) {
-    double width = MediaQuery.of(context).size.width;
 
-    Map<String, String> userProfile = {
-      'Gender': 'Female',
-      'D.O.B': '1995-05-15',
-      'Phone': '+91 9876543210',
-      'Email': 'user@example.com',
-      'Place': 'Kochi',
-      'Post': 'Ernakulam',
-      'District': 'Ernakulam',
-      'State': 'Kerala',
-    };
 
-    return Drawer(
-      backgroundColor: Colors.white,
-      child: Column(
-        children: [
-          Container(
-            height: width * 0.75,
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Color(0xFFFF8FB1), Color(0xFFFFC2D6)],
-              ),
-            ),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 70,
-                  height: 70,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.white,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.pink.withOpacity(0.3),
-                        blurRadius: 10,
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.person_rounded,
-                    size: 35,
-                    color: Color(0xFFFF8FB1),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'SheCare User',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                const Text(
-                  'Stay Safe, Stay Connected',
-                  style: TextStyle(fontSize: 12, color: Colors.white70),
-                ),
-                const SizedBox(height: 12),
-                Expanded(
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 12),
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.9),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          textArea('Gender', userProfile['Gender'] ?? ''),
-                          textArea('D.O.B', userProfile['D.O.B'] ?? ''),
-                          textArea('Phone', userProfile['Phone'] ?? ''),
-                          textArea('Email', userProfile['Email'] ?? ''),
-                          textArea('Place', userProfile['Place'] ?? ''),
-                          textArea('Post', userProfile['Post'] ?? ''),
-                          textArea('District', userProfile['District'] ?? ''),
-                          textArea('State', userProfile['State'] ?? ''),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.only(top: 8),
-              children: [
-                _buildDrawerItem(
-                  icon: Icons.contact_phone_rounded,
-                  title: 'Emergency Contacts',
-                  onTap: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => Set_emergency_number(title: "Emergency Number"),
-                    ),
-                  ),
-                ),
-                const Divider(height: 20, indent: 16, endIndent: 16),
-                _buildDrawerItem(
-                  icon: Icons.logout_rounded,
-                  title: 'Logout',
-                  color: Colors.red,
-                  onTap: () => _showLogoutDialog(context),
-                ),
-                const SizedBox(height: 20),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget textArea(String label, String data, {bool isImportant = false, bool isHeader = false}) {
+  Widget textArea(String label, String data,
+      {bool isImportant = false, bool isHeader = false}) {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.symmetric(vertical: 4.0, horizontal: 8.0),
@@ -960,7 +913,8 @@ class _UserHomeState extends State<UserHome> {
         color: isImportant ? const Color(0xFFFFE3EC) : Colors.white,
         borderRadius: BorderRadius.circular(8.0),
         border: Border.all(
-          color: isImportant ? const Color(0xFFFF8FB1) : const Color(0xFFFFC2D6),
+          color:
+              isImportant ? const Color(0xFFFF8FB1) : const Color(0xFFFFC2D6),
           width: isImportant ? 1.5 : 1.0,
         ),
       ),
@@ -971,10 +925,10 @@ class _UserHomeState extends State<UserHome> {
             width: 70,
             child: Text(
               '$label:',
-              style: TextStyle(
+              style: const TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
-                color: const Color(0xFFFF8FB1),
+                color: Color(0xFFFF8FB1),
               ),
             ),
           ),
@@ -1011,18 +965,22 @@ class _UserHomeState extends State<UserHome> {
       child: ListTile(
         leading: Icon(
           icon,
-          color: color ?? (isSelected ? const Color(0xFFFF8FB1) : Colors.grey[700]),
+          color: color ??
+              (isSelected ? const Color(0xFFFF8FB1) : Colors.grey[700]),
           size: 24,
         ),
         title: Text(
           title,
           style: TextStyle(
             fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
-            color: color ?? (isSelected ? const Color(0xFFFF8FB1) : Colors.grey[700]),
+            color: color ??
+                (isSelected ? const Color(0xFFFF8FB1) : Colors.grey[700]),
             fontSize: 16,
           ),
         ),
-        trailing: isSelected ? const Icon(Icons.circle, size: 8, color: Color(0xFFFF8FB1)) : null,
+        trailing: isSelected
+            ? const Icon(Icons.circle, size: 8, color: Color(0xFFFF8FB1))
+            : null,
         onTap: onTap,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1058,12 +1016,13 @@ class _StatusIndicator extends StatelessWidget {
   final String text;
   final Color color;
 
-  const _StatusIndicator({required this.icon, required this.text, required this.color});
+  const _StatusIndicator(
+      {required this.icon, required this.text, required this.color});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.all(8),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
         color: color.withOpacity(0.8),
         borderRadius: BorderRadius.circular(20),
@@ -1072,115 +1031,19 @@ class _StatusIndicator extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, color: Colors.white, size: 16),
-          SizedBox(width: 4),
-          Text(text, style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
-        ],
-      ),
-    );
-  }
-}
-
-// 🆕 Last Motion Indicator Widget
-class _LastMotionIndicator extends StatelessWidget {
-  final Map<String, dynamic> motionData;
-
-  const _LastMotionIndicator({required this.motionData});
-
-  @override
-  Widget build(BuildContext context) {
-    String motionType = motionData['motion_type'] ?? 'unknown';
-    bool first3SecCompleted = motionData['first_3sec_completed'] ?? false;
-    String formattedStart = motionData['formatted_start'] ?? 'Unknown time';
-
-    Color getColor() {
-      if (motionType == 'rapid_shake' || motionType == 'throw') {
-        return Colors.red;
-      } else if (motionType == 'shake') {
-        return Colors.orange;
-      } else {
-        return Colors.green;
-      }
-    }
-
-    IconData getIcon() {
-      if (motionType == 'rapid_shake') return Icons.vibration;
-      if (motionType == 'throw') return Icons.flight_takeoff;
-      if (motionType == 'shake') return Icons.waves;
-      return Icons.accessibility;
-    }
-
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: getColor().withOpacity(0.9),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(getIcon(), color: Colors.white, size: 16),
-          SizedBox(width: 6),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                '${motionType.replaceAll('_', ' ').toUpperCase()}',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 10,
-                    fontWeight: FontWeight.bold
-                ),
-              ),
-              Text(
-                first3SecCompleted ? '3s Captured' : 'Short',
-                style: TextStyle(
+          const SizedBox(width: 4),
+          Text(text,
+              style: const TextStyle(
                   color: Colors.white,
-                  fontSize: 8,
-                ),
-              ),
-            ],
-          ),
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold)),
         ],
       ),
     );
   }
 }
 
-// Volume Press Counter Widget
-class _VolumePressCounter extends StatelessWidget {
-  final int count;
-
-  const _VolumePressCounter({required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.7),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.volume_up, color: Colors.white, size: 16),
-          SizedBox(width: 6),
-          Text(
-            'SOS: $count/3',
-            style: TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.bold
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ... rest of your existing MainHome class remains the same
+// MainHome Class
 class MainHome extends StatefulWidget {
   const MainHome({super.key});
 
@@ -1189,33 +1052,74 @@ class MainHome extends StatefulWidget {
 }
 
 class _MainHomeState extends State<MainHome> {
+
   void _showLogoutDialog(BuildContext context) {
     showDialog(
       context: context,
       builder: (BuildContext context) {
         return Dialog(
           backgroundColor: Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          shape:
+          RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           child: Padding(
             padding: const EdgeInsets.all(24.0),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
-                  width: 60, height: 60,
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.red.withOpacity(0.1)),
-                  child: const Icon(Icons.logout_rounded, size: 30, color: Colors.red),
+                  width: 60,
+                  height: 60,
+                  decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.red.withOpacity(0.1)),
+                  child: const Icon(Icons.logout_rounded,
+                      size: 30, color: Colors.red),
                 ),
                 const SizedBox(height: 16),
-                const Text('Logout', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                const Text('Logout',
+                    style:
+                    TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 8),
-                const Text('Are you sure you want to logout?', textAlign: TextAlign.center, style: TextStyle(fontSize: 16, color: Colors.grey)),
+                const Text('Are you sure you want to logout?',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 16, color: Colors.grey)),
                 const SizedBox(height: 24),
                 Row(
                   children: [
-                    Expanded(child: OutlinedButton(onPressed: () => Navigator.pop(context), style: OutlinedButton.styleFrom(foregroundColor: Colors.grey, side: const BorderSide(color: Colors.grey), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text('Cancel'))),
+                    Expanded(
+                        child: OutlinedButton(
+                            onPressed: () => Navigator.pop(context),
+                            style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.grey,
+                                side: const BorderSide(color: Colors.grey),
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12)),
+                                padding:
+                                const EdgeInsets.symmetric(vertical: 16)),
+                            child: const Text('Cancel'))),
                     const SizedBox(width: 16),
-                    Expanded(child: ElevatedButton(onPressed: () { Navigator.pop(context); Navigator.pushReplacement(context, MaterialPageRoute(builder: (context) => LoginPage())); }, style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)), padding: const EdgeInsets.symmetric(vertical: 16)), child: const Text('Logout'))),
+                    Expanded(
+                        child: ElevatedButton(
+                            onPressed: () async{
+                              SharedPreferences sh = await SharedPreferences.getInstance();
+                              String url = sh.getString('url')??"";
+                              sh.clear();
+                              sh.setString('url', url);
+                              sh.setBool('isLogged', false);
+
+
+                              Navigator.pop(context);
+                              Navigator.pushReplacement(context,
+                                  MaterialPageRoute(builder: (context)=> LoginPage()));
+                            },
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.red,
+                                foregroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12)),
+                                padding:
+                                const EdgeInsets.symmetric(vertical: 16)),
+                            child: const Text('Logout'))),
                   ],
                 ),
               ],
@@ -1258,12 +1162,6 @@ class _MainHomeState extends State<MainHome> {
                     children: [
                       Row(
                         children: [
-                          Builder(
-                            builder: (context) => IconButton(
-                              icon: const Icon(Icons.menu_rounded, color: Colors.black),
-                              onPressed: () => Scaffold.of(context).openDrawer(),
-                            ),
-                          ),
                           const Text(
                             "SheCare",
                             style: TextStyle(
@@ -1275,9 +1173,11 @@ class _MainHomeState extends State<MainHome> {
                         ],
                       ),
                       const SizedBox(width: 48),
-                      IconButton(onPressed: (){
-                        _showLogoutDialog(context);
-                      }, icon: Icon(Icons.logout_outlined))
+                      IconButton(
+                          onPressed: () {
+                            _showLogoutDialog(context);
+                          },
+                          icon: const Icon(Icons.logout_outlined))
                     ],
                   ),
                   const SizedBox(height: 20),
@@ -1311,10 +1211,12 @@ class _MainHomeState extends State<MainHome> {
                     color: Colors.red,
                     children: [
                       _buildHelplineItem('Women Helpline', '1091', Icons.phone),
-                      _buildHelplineItem('National Emergency', '112', Icons.emergency),
+                      _buildHelplineItem(
+                          'National Emergency', '112', Icons.emergency),
                       _buildHelplineItem('Police', '100', Icons.local_police),
                       _buildHelplineItem('Cyber Crime', '1930', Icons.computer),
-                      _buildHelplineItem('Child Helpline', '1098', Icons.child_care),
+                      _buildHelplineItem(
+                          'Child Helpline', '1098', Icons.child_care),
                     ],
                   ),
                   const SizedBox(height: 20),
@@ -1322,11 +1224,16 @@ class _MainHomeState extends State<MainHome> {
                     title: '💡 Safety Tips',
                     color: Colors.orange,
                     children: [
-                      _buildTipItem('Share your live location with trusted contacts when traveling'),
-                      _buildTipItem('Trust your instincts - if something feels wrong, it probably is'),
-                      _buildTipItem('Keep your phone charged and emergency numbers saved'),
-                      _buildTipItem('Avoid isolated areas, especially during late hours'),
-                      _buildTipItem('Be aware of your surroundings at all times'),
+                      _buildTipItem(
+                          'Share your live location with trusted contacts when traveling'),
+                      _buildTipItem(
+                          'Trust your instincts - if something feels wrong, it probably is'),
+                      _buildTipItem(
+                          'Keep your phone charged and emergency numbers saved'),
+                      _buildTipItem(
+                          'Avoid isolated areas, especially during late hours'),
+                      _buildTipItem(
+                          'Be aware of your surroundings at all times'),
                       _buildTipItem('Learn basic self-defense techniques'),
                     ],
                   ),
@@ -1335,11 +1242,15 @@ class _MainHomeState extends State<MainHome> {
                     title: '🥊 Quick Self-Defense Tips',
                     color: Colors.purple,
                     children: [
-                      _buildTipItem('Target vulnerable areas: eyes, nose, throat, groin'),
-                      _buildTipItem('Make noise - scream and attract attention'),
-                      _buildTipItem('Use everyday items as weapons (keys, umbrella, bag)'),
+                      _buildTipItem(
+                          'Target vulnerable areas: eyes, nose, throat, groin'),
+                      _buildTipItem(
+                          'Make noise - scream and attract attention'),
+                      _buildTipItem(
+                          'Use everyday items as weapons (keys, umbrella, bag)'),
                       _buildTipItem('Create distance and escape immediately'),
-                      _buildTipItem('Never hesitate to fight back if in danger'),
+                      _buildTipItem(
+                          'Never hesitate to fight back if in danger'),
                     ],
                   ),
                   const SizedBox(height: 20),
@@ -1347,11 +1258,16 @@ class _MainHomeState extends State<MainHome> {
                     title: '📱 Digital Safety',
                     color: Colors.blue,
                     children: [
-                      _buildTipItem('Don\'t share personal information with strangers online'),
-                      _buildTipItem('Use strong passwords and enable two-factor authentication'),
-                      _buildTipItem('Be cautious of suspicious links and messages'),
-                      _buildTipItem('Review privacy settings on social media regularly'),
-                      _buildTipItem('Report cyberbullying and harassment immediately'),
+                      _buildTipItem(
+                          'Don\'t share personal information with strangers online'),
+                      _buildTipItem(
+                          'Use strong passwords and enable two-factor authentication'),
+                      _buildTipItem(
+                          'Be cautious of suspicious links and messages'),
+                      _buildTipItem(
+                          'Review privacy settings on social media regularly'),
+                      _buildTipItem(
+                          'Report cyberbullying and harassment immediately'),
                     ],
                   ),
                   const SizedBox(height: 20),
@@ -1359,10 +1275,14 @@ class _MainHomeState extends State<MainHome> {
                     title: '🚗 Travel Safety',
                     color: Colors.green,
                     children: [
-                      _buildTipItem('Verify cab details before getting in (number plate, driver photo)'),
-                      _buildTipItem('Sit in the back seat and keep doors locked'),
-                      _buildTipItem('Share trip details with family or friends'),
-                      _buildTipItem('Avoid traveling alone late at night when possible'),
+                      _buildTipItem(
+                          'Verify cab details before getting in (number plate, driver photo)'),
+                      _buildTipItem(
+                          'Sit in the back seat and keep doors locked'),
+                      _buildTipItem(
+                          'Share trip details with family or friends'),
+                      _buildTipItem(
+                          'Avoid traveling alone late at night when possible'),
                       _buildTipItem('Keep emergency contacts on speed dial'),
                     ],
                   ),
