@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:shecare/chatBot.dart';
+import 'package:shecare/home_screen.dart';
 import 'package:shecare/ipPage.dart';
+import 'package:shecare/sampleNotification.dart';
+import 'package:shecare/services/sos_test_page.dart';
+import 'package:shecare/tempHomeScreenNew.dart';
 
 
 
@@ -38,8 +43,9 @@ class MyApp extends StatelessWidget {
           fillColor: Colors.white,
           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
+
       ),
-      home:  const IpPage(),
+      home:   IpPage(),
     );
   }
 }

@@ -1,17 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
-import 'package:shecare/forgotpassword.dart';
-import 'package:shecare/pinkhm/screens/main_screen.dart';
-import 'package:shecare/sos_service.dart';
-import 'package:shecare/user/home_screen.dart';
-import 'package:shecare/user/sign_up.dart';
+import 'package:shecare/hk/pinkpolice_home.dart';
+import 'package:shecare/home_screen.dart';
+import 'package:shecare/sign_up.dart';
 
 class LoginPage extends StatefulWidget {
   @override
@@ -158,7 +155,7 @@ class _LoginPageState extends State<LoginPage> {
                                   if (value == null || value.isEmpty) {
                                     return 'Please enter your password';
                                   }
-                                  if (value.length < 6) {
+                                  if (value.length < 3) {
                                     return 'Password must be at least 6 characters';
                                   }
                                   return null;
@@ -219,7 +216,7 @@ class _LoginPageState extends State<LoginPage> {
                                         context,
                                         MaterialPageRoute(
                                           builder: (context) =>
-                                              MyMySignupPage(title: "Home"),
+                                              MyMySignupPage(),
                                         ),
                                       );
                                     },
@@ -298,6 +295,14 @@ class _LoginPageState extends State<LoginPage> {
             Navigator.pushReplacement(
               context,
               MaterialPageRoute(builder: (_) => UserHome()),
+            );
+          }
+          else if(type=="pinkpolice"){
+            sh.setBool("isLogged", true);
+            sh.setString('type','pinkpolice' );
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (_) => PinkPolice_home()),
             );
           }
 
